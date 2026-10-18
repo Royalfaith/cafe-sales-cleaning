@@ -1,19 +1,20 @@
--- Cafe sales cleaning pipeline (SQLite syntax)
--- Input : raw_cafe  (all columns loaded as TEXT from dirty_cafe_sales.csv)
+-- Cafe sales cleaning pipeline (MySQL syntax)
+-- Input : raw_cafe  (imported from dirty_cafe_sales.csv, all columns as text)
 -- Output: cafe_clean (10,000 rows kept, nothing deleted; unrecoverable values stay NULL or 'Unknown')
 
 -- STEP 1: Standardise every kind of "missing" (blank, ERROR, UNKNOWN) to NULL
 DROP TABLE IF EXISTS step1;
 CREATE TABLE step1 AS
 SELECT
-  TRIM("Transaction ID") AS transaction_id,
+  TRIM(`Transaction ID`) AS transaction_id,
   CASE WHEN TRIM(Item)               IN ('','ERROR','UNKNOWN') THEN NULL ELSE TRIM(Item) END               AS item,
   CASE WHEN TRIM(Quantity)           IN ('','ERROR','UNKNOWN') THEN NULL ELSE TRIM(Quantity) END           AS quantity,
-  CASE WHEN TRIM("Price Per Unit")   IN ('','ERROR','UNKNOWN') THEN NULL ELSE TRIM("Price Per Unit") END   AS price_per_unit,
-  CASE WHEN TRIM("Total Spent")      IN ('','ERROR','UNKNOWN') THEN NULL ELSE TRIM("Total Spent") END      AS total_spent,
-  CASE WHEN TRIM("Payment Method")   IN ('','ERROR','UNKNOWN') THEN NULL ELSE TRIM("Payment Method") END   AS payment_method,
+  CASE WHEN TRIM(`Price Per Unit`)   IN ('','ERROR','UNKNOWN') THEN NULL ELSE TRIM(`Price Per Unit`) END   AS price_per_unit,
+  CASE WHEN TRIM(`Total Spent`)      IN ('','ERROR','UNKNOWN') THEN NULL ELSE TRIM(`Total Spent`) END      AS total_spent,
+  CASE WHEN TRIM(`Payment Method`)   IN ('','ERROR','UNKNOWN') THEN NULL ELSE TRIM(`Payment Method`) END   AS payment_method,
   CASE WHEN TRIM(Location)           IN ('','ERROR','UNKNOWN') THEN NULL ELSE TRIM(Location) END           AS location,
-  CASE WHEN TRIM("Transaction Date") IN ('','ERROR','UNKNOWN') THEN NULL ELSE TRIM("Transaction Date") END AS transaction_date
+  -- CHAR(13) removes a stray carriage return that some CSV imports leave on the last column
+  CASE WHEN TRIM(REPLACE(`Transaction Date`, CHAR(13), '')) IN ('','ERROR','UNKNOWN') THEN NULL ELSE TRIM(REPLACE(`Transaction Date`, CHAR(13), '')) END AS transaction_date
 FROM raw_cafe;
 
 -- STEP 2: Convert text to proper types (integer, decimal, valid date)
@@ -22,12 +23,12 @@ CREATE TABLE step2 AS
 SELECT
   transaction_id,
   item,
-  CAST(quantity AS INTEGER)       AS quantity,
-  CAST(price_per_unit AS REAL)    AS price_per_unit,
-  CAST(total_spent AS REAL)       AS total_spent,
+  CAST(quantity AS SIGNED)            AS quantity,
+  CAST(price_per_unit AS DECIMAL(10,2)) AS price_per_unit,
+  CAST(total_spent AS DECIMAL(10,2))    AS total_spent,
   payment_method,
   location,
-  CASE WHEN date(transaction_date) = transaction_date THEN transaction_date END AS transaction_date
+  STR_TO_DATE(transaction_date, '%Y-%m-%d') AS transaction_date
 FROM step1;
 
 -- STEP 3: Recover numbers with arithmetic (Total = Quantity x Price)
@@ -38,10 +39,11 @@ SELECT
   item,
   COALESCE(quantity,
     CASE WHEN price_per_unit > 0 AND total_spent IS NOT NULL
-          AND ABS(total_spent / price_per_unit - ROUND(total_spent / price_per_unit)) < 1e-9
-         THEN CAST(ROUND(total_spent / price_per_unit) AS INTEGER) END)        AS quantity,
+          AND ABS(total_spent / price_per_unit - ROUND(total_spent / price_per_unit)) < 0.000001
+         THEN CAST(ROUND(total_spent / price_per_unit) AS SIGNED) END)           AS quantity,
   COALESCE(price_per_unit,
-    CASE WHEN quantity > 0 AND total_spent IS NOT NULL THEN total_spent / quantity END) AS price_per_unit,
+    CASE WHEN quantity > 0 AND total_spent IS NOT NULL
+         THEN ROUND(total_spent / quantity, 2) END)                              AS price_per_unit,
   COALESCE(total_spent, quantity * price_per_unit)                               AS total_spent,
   payment_method,
   location,
@@ -78,8 +80,8 @@ SELECT
   transaction_id, item,
   COALESCE(quantity,
     CASE WHEN price_per_unit > 0 AND total_spent IS NOT NULL
-          AND ABS(total_spent / price_per_unit - ROUND(total_spent / price_per_unit)) < 1e-9
-         THEN CAST(ROUND(total_spent / price_per_unit) AS INTEGER) END) AS quantity,
+          AND ABS(total_spent / price_per_unit - ROUND(total_spent / price_per_unit)) < 0.000001
+         THEN CAST(ROUND(total_spent / price_per_unit) AS SIGNED) END) AS quantity,
   price_per_unit,
   COALESCE(total_spent, quantity * price_per_unit)                      AS total_spent,
   payment_method, location, transaction_date
@@ -96,9 +98,9 @@ FROM step4;
 
 -- STEP 6: Integrity checks (all should return 0 rows)
 --   duplicate IDs:
---     SELECT transaction_id, COUNT(*) FROM step5 GROUP BY 1 HAVING COUNT(*) > 1;
+--     SELECT transaction_id, COUNT(*) FROM step5 GROUP BY transaction_id HAVING COUNT(*) > 1;
 --   malformed IDs:
---     SELECT * FROM step5 WHERE transaction_id NOT GLOB 'TXN_[0-9][0-9][0-9][0-9][0-9][0-9][0-9]';
+--     SELECT * FROM step5 WHERE transaction_id NOT REGEXP '^TXN_[0-9]{7}$';
 --   arithmetic that does not hold:
 --     SELECT * FROM step5 WHERE quantity IS NOT NULL AND price_per_unit IS NOT NULL
 --       AND total_spent IS NOT NULL AND ABS(total_spent - quantity * price_per_unit) > 0.001;
